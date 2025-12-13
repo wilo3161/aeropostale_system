@@ -1,4 +1,4 @@
-# app.py - SOLO CAMBIOS NECESARIOS
+# app.py - INTEGRACIÓN COMPLETA DE MÓDULOS FASE 2
 
 # ================================
 # IMPORTACIONES ACTUALIZADAS
@@ -50,14 +50,18 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ================================
-# IMPORTAR NUEVOS MÓDULOS
+# IMPORTAR TODOS LOS MÓDULOS
 # ================================
 from modules import (
     get_config,
     get_error_handler,
     get_health_monitor,
-    init_health_monitoring,
-    error_handler_decorator
+    get_database,
+    get_cache_manager,
+    get_backup_system,
+    cached,
+    error_handler_decorator,
+    init_health_monitoring
 )
 
 # ================================
@@ -72,15 +76,18 @@ error_handler = get_error_handler()
 # Monitor de salud
 health_monitor = get_health_monitor()
 
-# ================================
-# REEMPLAZAR VARIABLES DE CONFIGURACIÓN
-# ================================
-# OLD: SUPABASE_URL = "https://..."
-# OLD: SUPABASE_KEY = "eyJhbGci..."
-# OLD: ADMIN_PASSWORD = "Wilo3161"
-# OLD: USER_PASSWORD = "User1234"
+# Base de datos optimizada
+db = get_database()
 
-# NEW: Usar config.get()
+# Gestor de caché
+cache_manager = get_cache_manager()
+
+# Sistema de backup
+backup_system = get_backup_system()
+
+# ================================
+# VARIABLES DE CONFIGURACIÓN
+# ================================
 SUPABASE_URL = config.get('database.url')
 SUPABASE_KEY = config.get('database.key')
 ADMIN_PASSWORD = config.get('security.admin_password')
@@ -91,7 +98,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(APP_DIR, config.get('paths.images_dir', 'images'))
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
-# Configuración de WILO AI desde configuración
+# Configuración de WILO AI
 WILO_DATA_FOLDER = Path(config.get('paths.data_dir', 'data_wilo'))
 WILO_DATA_FOLDER.mkdir(exist_ok=True)
 NOVEDADES_DB = WILO_DATA_FOLDER / "novedades_database.json"
@@ -99,502 +106,613 @@ CONFIG_EMAIL_FILE = WILO_DATA_FOLDER / "email_config.json"
 CONFIG_GEMINI_FILE = WILO_DATA_FOLDER / "gemini_config.json"
 
 # ================================
-# INICIALIZACIÓN DE SESSION STATE (MEJORADO)
+# REEMPLAZAR FUNCIONES DE BASE DE DATOS
 # ================================
-def init_session_state():
-    """Inicializa todas las variables de session state"""
-    defaults = {
-        'user_type': None,
-        'password_correct': False,
-        'selected_menu': 0,
-        'show_login': False,
-        'historico_data': None,
-        'wilo_ai': None,
-        'reconciler': None,
-        'processed': False,
-        'show_details': False,
-        'show_preview': False,
-        'pdf_data': None,
-        'datos_calculados': None,
-        'fecha_guardar': None,
-        'health_monitoring_started': False
-    }
+# Todas las funciones que usaban supabase directamente ahora usarán 'db'
+
+# Ejemplo de reemplazo:
+# OLD: obtener_trabajadores() -> supabase.from_('trabajadores')...
+# NEW: db.obtener_trabajadores()
+
+# ================================
+# FUNCIONES OPTIMIZADAS CON CACHÉ
+# ================================
+@cached(ttl=300, tags=['kpis', 'dashboard'])
+def obtener_trabajadores_cached() -> pd.DataFrame:
+    """Obtiene trabajadores con caché"""
+    return db.obtener_trabajadores()
+
+@cached(ttl=600, tags=['kpis', 'historico'])
+def cargar_historico_kpis_cached(fecha_inicio: str = None, fecha_fin: str = None, 
+                                 trabajador: str = None) -> pd.DataFrame:
+    """Carga histórico con caché"""
+    return db.cargar_historico_kpis(fecha_inicio, fecha_fin, trabajador)
+
+@cached(ttl=300, tags=['distribuciones'])
+def obtener_distribuciones_semana_cached(fecha_inicio_semana: str) -> Dict:
+    """Obtiene distribuciones con caché"""
+    return db.obtener_distribuciones_semana(fecha_inicio_semana)
+
+@cached(ttl=300, tags=['guias'])
+def obtener_historial_guias_cached(limit: int = 100) -> pd.DataFrame:
+    """Obtiene historial de guías con caché"""
+    return db.obtener_historial_guias(limit)
+
+# ================================
+# NUEVA SECCIÓN: SISTEMA DE BACKUP
+# ================================
+def mostrar_sistema_backup():
+    """Muestra el dashboard del sistema de backup"""
+    st.markdown("<div class='dashboard-header'><h1 class='header-title'>💾 Sistema de Backup</h1><div class='header-subtitle'>Respaldo y restauración de datos</div></div>", unsafe_allow_html=True)
     
-    for key, default_value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = default_value
-
-init_session_state()
-
-# ================================
-# CONFIGURACIÓN INICIAL Y LOGGING (MEJORADO)
-# ================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/system.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# ================================
-# INICIALIZACIÓN DE SUPABASE (MEJORADO)
-# ================================
-@st.cache_resource
-def init_supabase() -> Optional[Client]:
-    """Inicializa y cachea el cliente de Supabase con manejo de errores"""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        error_msg = "Faltan las variables de configuración de Supabase"
-        logger.error(error_msg)
-        st.error(error_handler.handle(Exception(error_msg), 
-                                      user_context="❌ Error de configuración de base de datos"))
-        return None
-    
-    try:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        error_handler.handle(e, {'context': 'init_supabase'})
-        return None
-
-# Inicializar cliente de Supabase
-supabase = init_supabase()
-
-# ================================
-# FUNCIONES DE UTILIDAD COMPARTIDAS (MEJORADAS)
-# ================================
-@error_handler_decorator("Error validando fecha")
-def validar_fecha(fecha: str) -> bool:
-    """Valida que la fecha tenga el formato YYYY-MM-DD"""
-    try:
-        datetime.strptime(fecha, "%Y-%m-%d")
-        return True
-    except ValueError:
-        return False
-
-@error_handler_decorator("Error validando número")
-def validar_numero_positivo(valor: Any) -> bool:
-    """Valida que un valor sea un número positivo"""
-    try:
-        num = float(valor)
-        return num >= 0
-    except (ValueError, TypeError):
-        return False
-
-@error_handler_decorator("Error validando distribuciones")
-def validar_distribuciones(valor: Any) -> bool:
-    """Valida que el valor de distribuciones sea positivo y numérico"""
-    try:
-        num = float(valor)
-        return num >= 0 and num <= 10000
-    except (ValueError, TypeError):
-        return False
-
-def hash_password(pw: str) -> str:
-    """Genera un hash SHA256 para una contraseña."""
-    return hashlib.sha256(pw.encode()).hexdigest()
-
-# ================================
-# FUNCIONES DE KPIs (MEJORADAS)
-# ================================
-@error_handler_decorator("Error calculando KPI")
-def calcular_kpi(cantidad: float, meta: float) -> float:
-    """Calcula el porcentaje de KPI general"""
-    try:
-        return (cantidad / meta) * 100 if meta > 0 else 0
-    except Exception as e:
-        error_handler.handle(e, {'cantidad': cantidad, 'meta': meta})
-        return 0
-
-# ... (resto de funciones KPI con decorador) ...
-
-# ================================
-# FUNCIONES DE ACCESO A DATOS (MEJORADAS)
-# ================================
-@error_handler_decorator("Error obteniendo trabajadores")
-def obtener_trabajadores() -> pd.DataFrame:
-    """Obtiene la lista de trabajadores desde Supabase"""
-    if supabase is None:
-        error_msg = "Cliente de Supabase no inicializado"
-        logger.error(error_msg)
-        return pd.DataFrame({
-            'nombre': ["Andrés Yépez", "Josué Imbacuán", "Luis Perugachi", "Diana García", 
-                      "Simón Vera", "Jhonny Guadalupe", "Victor Montenegro", "Fernando Quishpe"],
-            'equipo': ["Transferencias", "Transferencias", "Distribución", "Arreglo", 
-                      "Guías", "Ventas", "Ventas", "Ventas"]
-        })
-    
-    try:
-        response = supabase.from_('trabajadores').select('nombre, equipo').eq('activo', True).order('equipo,nombre', desc=False).execute()
-        
-        if hasattr(response, 'error') and response.error:
-            logger.error(f"No se pudieron obtener trabajadores: {response.error}")
-            return pd.DataFrame({
-                'nombre': ["Andrés Yépez", "Josué Imbacuán", "Luis Perugachi", "Diana García", 
-                          "Simón Vera", "Jhonny Guadalupe", "Victor Montenegro", "Fernando Quishpe"],
-                'equipo': ["Transferencias", "Transferencias", "Distribución", "Arreglo", 
-                          "Guías", "Ventas", "Ventas", "Ventas"]
-            })
-        
-        if response and hasattr(response, 'data') and response.data:
-            df = pd.DataFrame(response.data)
-            if 'Luis Perugachi' in df['nombre'].values:
-                df.loc[df['nombre'] == 'Luis Perugachi', 'equipo'] = 'Distribución'
-            return df
-        else:
-            logger.warning("No se encontraron trabajadores en Supabase")
-            return pd.DataFrame(columns=['nombre', 'equipo'])
-    except Exception as e:
-        error_handler.handle(e, {'context': 'obtener_trabajadores'})
-        return pd.DataFrame({
-            'nombre': ["Andrés Yépez", "Josué Imbacuán", "Luis Perugachi", "Diana García", 
-                      "Simón Vera", "Jhonny Guadalupe", "Victor Montenegro", "Fernando Quishpe"],
-            'equipo': ["Transferencias", "Transferencias", "Distribución", "Arreglo", 
-                      "Guías", "Ventas", "Ventas", "Ventas"]
-        })
-
-# ... (resto de funciones de base de datos con decorador) ...
-
-# ================================
-# NUEVA SECCIÓN: SISTEMA DE SALUD
-# ================================
-def mostrar_sistema_salud():
-    """Muestra el dashboard del sistema de salud"""
-    st.markdown("<div class='dashboard-header'><h1 class='header-title'>❤️ Sistema de Salud</h1><div class='header-subtitle'>Monitoreo y diagnóstico del sistema</div></div>", unsafe_allow_html=True)
-    
-    # Iniciar monitoreo si no está activo
-    if not st.session_state.get('health_monitoring_started', False):
-        try:
-            init_health_monitoring(interval=60)
-            st.session_state.health_monitoring_started = True
-            st.success("✅ Monitoreo de salud iniciado")
-        except Exception as e:
-            error_handler.handle(e, user_context="❌ Error iniciando monitoreo de salud")
-    
-    # Pestañas
-    tab1, tab2, tab3 = st.tabs(["📊 Estado Actual", "📈 Métricas", "⚙️ Configuración"])
+    tab1, tab2, tab3 = st.tabs(["📊 Estado", "🔄 Operaciones", "⚙️ Configuración"])
     
     with tab1:
-        mostrar_estado_salud()
+        mostrar_estado_backup()
     
     with tab2:
-        mostrar_metricas_salud()
+        mostrar_operaciones_backup()
     
     with tab3:
-        mostrar_configuracion_salud()
+        mostrar_configuracion_backup()
 
-def mostrar_estado_salud():
-    """Muestra el estado actual del sistema"""
+def mostrar_estado_backup():
+    """Muestra el estado del sistema de backup"""
     try:
-        # Obtener estado de salud
-        health_status = health_monitor.get_health_status()
+        # Estadísticas
+        stats = backup_system.get_backup_stats()
         
-        # Encabezado con estado
-        status_color = "🟢" if health_status['status'] == 'healthy' else "🔴"
-        st.markdown(f"### {status_color} Estado General: {health_status['overall_health']:.1f}%")
-        
-        # KPIs rápidos
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Salud", f"{health_status['overall_health']:.1f}%")
+            st.metric("Total Backups", stats['total_backups'])
         
         with col2:
-            critical_issues = health_status['critical_issues']
-            st.metric("Problemas Críticos", critical_issues, 
-                     delta=None if critical_issues == 0 else f"+{critical_issues}")
+            st.metric("Espacio Usado", f"{stats['total_size_gb']:.2f} GB")
         
         with col3:
-            cpu = health_status['system_metrics'].get('cpu_percent', 0)
-            st.metric("CPU", f"{cpu:.1f}%")
+            if stats['newest_backup']:
+                newest = datetime.fromisoformat(stats['newest_backup'])
+                st.metric("Más Reciente", newest.strftime("%d/%m %H:%M"))
         
         with col4:
-            memory = health_status['system_metrics'].get('memory_percent', 0)
-            st.metric("Memoria", f"{memory:.1f}%")
+            st.metric("Retención", f"{stats['retention_days']} días")
         
-        # Checks detallados
-        st.subheader("🔍 Checks de Salud")
+        # Lista de backups
+        st.subheader("📋 Backups Disponibles")
+        backups = backup_system.list_backups()
         
-        for check_name, check_result in health_status['checks'].items():
-            status_icon = "✅" if check_result['status'] == 'healthy' else "❌"
-            with st.expander(f"{status_icon} {check_name}"):
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.write(f"**Estado:** {check_result['status']}")
-                    st.write(f"**Tiempo respuesta:** {check_result.get('response_time', 0):.2f}s")
-                with col_b:
-                    st.write(f"**Última verificación:** {check_result['timestamp'][11:19]}")
-                    if check_result['status'] == 'unhealthy':
-                        st.error(f"**Error:** {check_result.get('error', 'Desconocido')}")
-        
-        # Sistema de métricas
-        st.subheader("📊 Métricas del Sistema")
-        
-        if health_status['system_metrics']:
-            metrics_cols = st.columns(3)
+        if backups:
+            # Crear DataFrame para visualización
+            backup_data = []
+            for backup in backups[:10]:  # Mostrar solo los 10 más recientes
+                created = datetime.fromisoformat(backup['created'])
+                backup_data.append({
+                    'Nombre': backup['filename'],
+                    'Tipo': backup['type'],
+                    'Tamaño (MB)': f"{backup['size_mb']:.1f}",
+                    'Creado': created.strftime("%Y-%m-%d %H:%M"),
+                    'Descripción': backup['description'][:50] + '...' if len(backup['description']) > 50 else backup['description']
+                })
             
-            with metrics_cols[0]:
-                st.markdown("**CPU y Memoria**")
-                st.progress(health_status['system_metrics'].get('cpu_percent', 0) / 100, 
-                           text=f"CPU: {health_status['system_metrics'].get('cpu_percent', 0):.1f}%")
-                st.progress(health_status['system_metrics'].get('memory_percent', 0) / 100,
-                           text=f"Memoria: {health_status['system_metrics'].get('memory_percent', 0):.1f}%")
+            df_backups = pd.DataFrame(backup_data)
+            st.dataframe(df_backups, use_container_width=True, hide_index=True)
             
-            with metrics_cols[1]:
-                st.markdown("**Almacenamiento**")
-                st.progress(health_status['system_metrics'].get('disk_percent', 0) / 100,
-                           text=f"Disco: {health_status['system_metrics'].get('disk_percent', 0):.1f}%")
-                
-                if 'disk_free_gb' in health_status['system_metrics']:
-                    st.info(f"Libre: {health_status['system_metrics']['disk_free_gb']:.1f} GB")
-            
-            with metrics_cols[2]:
-                st.markdown("**Red**")
-                if 'bytes_sent_mb' in health_status['system_metrics']:
-                    st.metric("Enviado", f"{health_status['system_metrics']['bytes_sent_mb']:.1f} MB")
-                if 'bytes_recv_mb' in health_status['system_metrics']:
-                    st.metric("Recibido", f"{health_status['system_metrics']['bytes_recv_mb']:.1f} MB")
-        
-        # Recomendaciones
-        if health_status['summary']['issues'] or health_status['summary']['warnings']:
-            st.subheader("🚨 Recomendaciones")
-            
-            if health_status['summary']['issues']:
-                st.error("**Problemas detectados:**")
-                for issue in health_status['summary']['issues']:
-                    st.write(f"• {issue}")
-            
-            if health_status['summary']['warnings']:
-                st.warning("**Advertencias:**")
-                for warning in health_status['summary']['warnings']:
-                    st.write(f"• {warning}")
-            
-            if health_status['summary']['recommendations']:
-                st.info("**Acciones recomendadas:**")
-                for rec in health_status['summary']['recommendations']:
-                    st.write(f"• {rec}")
-        
-        # Botones de acción
-        col_btn1, col_btn2, col_btn3 = st.columns(3)
-        
-        with col_btn1:
-            if st.button("🔄 Re-ejecutar Checks", use_container_width=True):
-                st.rerun()
-        
-        with col_btn2:
-            if st.button("📊 Generar Reporte", use_container_width=True):
-                with st.spinner("Generando reporte..."):
-                    report = health_monitor.generate_report(hours=24)
-                    st.download_button(
-                        label="⬇️ Descargar JSON",
-                        data=json.dumps(report, indent=2, ensure_ascii=False),
-                        file_name=f"reporte_salud_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        mime="application/json",
-                        use_container_width=True
-                    )
-        
-        with col_btn3:
-            if st.button("🩺 Diagnóstico Completo", use_container_width=True):
-                with st.spinner("Ejecutando diagnóstico..."):
-                    time.sleep(2)
-                    st.success("Diagnóstico completado")
-                    # Aquí iría un diagnóstico más detallado
-    
-    except Exception as e:
-        error_handler.handle(e, user_context="❌ Error obteniendo estado de salud")
-
-def mostrar_metricas_salud():
-    """Muestra métricas históricas del sistema"""
-    try:
-        st.subheader("📈 Tendencias de Salud")
-        
-        # Selector de métrica
-        metric_options = {
-            'Salud General': 'overall_health',
-            'Uso de CPU': 'cpu_percent',
-            'Uso de Memoria': 'memory_percent',
-            'Uso de Disco': 'disk_percent'
-        }
-        
-        selected_metric = st.selectbox("Seleccionar métrica:", list(metric_options.keys()))
-        hours = st.slider("Horas a visualizar:", 1, 72, 24)
-        
-        # Obtener tendencia
-        if selected_metric == 'Salud General':
-            history = health_monitor.get_history(hours)
-            if history:
-                timestamps = [datetime.fromisoformat(h['timestamp']) for h in history]
-                values = [h['overall_health'] for h in history]
-                
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=timestamps, y=values,
-                    mode='lines+markers',
-                    name='Salud General',
-                    line=dict(color='green' if values[-1] > 80 else 'red')
-                ))
-                
-                fig.update_layout(
-                    title=f'Tendencia de Salud ({hours}h)',
-                    xaxis_title='Hora',
-                    yaxis_title='Salud (%)',
-                    yaxis=dict(range=[0, 100]),
-                    hovermode='x unified'
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
+            # Mostrar más detalles
+            with st.expander("📊 Estadísticas por Tipo"):
+                if stats['by_type']:
+                    for backup_type, type_stats in stats['by_type'].items():
+                        st.write(f"**{backup_type}**: {type_stats['count']} backups ({type_stats['total_size_mb']:.1f} MB)")
         else:
-            metric_id = metric_options[selected_metric]
-            trend_data = health_monitor.get_metrics_trend(metric_id, hours)
+            st.info("ℹ️ No hay backups disponibles")
+        
+        # Espacio en disco
+        st.subheader("💾 Espacio en Disco")
+        try:
+            import shutil
+            total, used, free = shutil.disk_usage("/")
             
-            if 'error' not in trend_data:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=trend_data['timestamps'], y=trend_data['values'],
-                    mode='lines+markers',
-                    name=selected_metric,
-                    line=dict(color='blue')
-                ))
-                
-                fig.update_layout(
-                    title=f'{selected_metric} - Últimas {hours}h',
-                    xaxis_title='Hora',
-                    yaxis_title=selected_metric,
-                    hovermode='x unified'
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Estadísticas
-                col_stats1, col_stats2, col_stats3 = st.columns(3)
-                with col_stats1:
-                    st.metric("Actual", f"{trend_data['current']:.1f}")
-                with col_stats2:
-                    st.metric("Promedio", f"{trend_data['average']:.1f}")
-                with col_stats3:
-                    st.metric("Tendencia", trend_data['trend'])
+            col_disk1, col_disk2, col_disk3 = st.columns(3)
+            
+            with col_disk1:
+                st.metric("Total", f"{total / (1024**3):.1f} GB")
+            
+            with col_disk2:
+                st.metric("Usado", f"{used / (1024**3):.1f} GB")
+            
+            with col_disk3:
+                st.metric("Libre", f"{free / (1024**3):.1f} GB")
+            
+            # Barra de progreso
+            usage_percent = (used / total) * 100
+            st.progress(usage_percent / 100, text=f"Uso de disco: {usage_percent:.1f}%")
+            
+            if usage_percent > 90:
+                st.error("⚠️ Disco casi lleno. Considere limpiar backups antiguos.")
+            elif usage_percent > 80:
+                st.warning("⚠️ Uso de disco elevado.")
         
-        # Reporte de errores
-        st.subheader("📊 Reporte de Errores")
-        
-        error_stats = error_handler.get_stats(hours)
-        error_df = error_handler.get_error_report(hours)
-        
-        col_err1, col_err2, col_err3 = st.columns(3)
-        
-        with col_err1:
-            st.metric("Total Errores", error_stats['total_errors'])
-        
-        with col_err2:
-            if error_stats['by_severity']:
-                high_errors = error_stats['by_severity'].get('high', 0)
-                st.metric("Errores Críticos", high_errors)
-        
-        with col_err3:
-            st.metric("Tasa de Error", error_stats['error_rate'])
-        
-        if not error_df.empty:
-            with st.expander("📋 Detalle de Errores"):
-                # Filtrar columnas para mostrar
-                display_cols = ['fecha', 'hora', 'category', 'severity', 'message']
-                display_cols = [col for col in display_cols if col in error_df.columns]
-                
-                st.dataframe(
-                    error_df[display_cols].head(20),
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # Botón para exportar
-                if st.button("📥 Exportar Errores a CSV", use_container_width=True):
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    filename = f"errores_{timestamp}.csv"
-                    if error_handler.export_to_csv(filename, hours):
-                        st.success(f"Errores exportados a {filename}")
+        except Exception as e:
+            error_handler.handle(e, user_context="Error obteniendo información de disco")
     
     except Exception as e:
-        error_handler.handle(e, user_context="❌ Error mostrando métricas de salud")
+        error_handler.handle(e, user_context="Error mostrando estado de backup")
 
-def mostrar_configuracion_salud():
-    """Muestra configuración del sistema de salud"""
-    st.subheader("⚙️ Configuración del Sistema")
+def mostrar_operaciones_backup():
+    """Muestra operaciones de backup/restore"""
+    st.subheader("🔄 Operaciones de Backup")
     
-    # Validar configuración actual
-    config_validation = config.validate()
+    col_op1, col_op2 = st.columns(2)
     
-    if config_validation['errors']:
-        st.error("**Errores de configuración:**")
-        for error in config_validation['errors']:
-            st.write(f"• {error}")
+    with col_op1:
+        # Crear backup manual
+        st.markdown("#### 📥 Crear Backup")
+        
+        backup_type = st.selectbox("Tipo de backup:", 
+                                  ["full", "incremental", "database_only"],
+                                  key="backup_type_select")
+        
+        description = st.text_input("Descripción (opcional):", 
+                                   key="backup_description")
+        
+        if st.button("🚀 Crear Backup Ahora", use_container_width=True):
+            with st.spinner("Creando backup..."):
+                backup_file = backup_system.create_backup(backup_type, description)
+                
+                if backup_file:
+                    st.success(f"✅ Backup creado: {backup_file.name}")
+                    
+                    # Mostrar detalles
+                    with st.expander("📋 Detalles del Backup"):
+                        st.write(f"**Archivo:** {backup_file.name}")
+                        st.write(f"**Tamaño:** {backup_file.stat().st_size / (1024*1024):.2f} MB")
+                        st.write(f"**Ruta:** {backup_file}")
+                        
+                        # Botón para descargar
+                        with open(backup_file, 'rb') as f:
+                            st.download_button(
+                                label="⬇️ Descargar Backup",
+                                data=f,
+                                file_name=backup_file.name,
+                                mime="application/zip",
+                                use_container_width=True
+                            )
+                else:
+                    st.error("❌ Error creando backup")
     
-    if config_validation['warnings']:
-        st.warning("**Advertencias de configuración:**")
-        for warning in config_validation['warnings']:
-            st.write(f"• {warning}")
+    with col_op2:
+        # Restaurar backup
+        st.markdown("#### 📤 Restaurar Backup")
+        
+        backups = backup_system.list_backups()
+        if backups:
+            backup_options = {b['filename']: b for b in backups}
+            selected_backup = st.selectbox("Seleccionar backup:", 
+                                          list(backup_options.keys()),
+                                          key="restore_backup_select")
+            
+            restore_type = st.selectbox("Tipo de restauración:",
+                                       ["full", "database_only", "configs_only"],
+                                       key="restore_type_select")
+            
+            st.warning("⚠️ **ADVERTENCIA:** La restauración sobrescribirá datos existentes.")
+            
+            if st.button("🔙 Restaurar Backup", type="secondary", use_container_width=True):
+                confirm = st.checkbox("Confirmo que deseo restaurar este backup")
+                
+                if confirm:
+                    backup_info = backup_options[selected_backup]
+                    
+                    with st.spinner(f"Restaurando {selected_backup}..."):
+                        success = backup_system.restore_backup(backup_info['path'], restore_type)
+                        
+                        if success:
+                            st.success("✅ Backup restaurado exitosamente")
+                            st.info("ℹ️ Es posible que necesite reiniciar la aplicación para ver los cambios.")
+                        else:
+                            st.error("❌ Error restaurando backup")
+                else:
+                    st.info("Por favor, confirme la restauración marcando la casilla.")
+        else:
+            st.info("No hay backups disponibles para restaurar")
     
-    if config_validation['is_valid']:
-        st.success("✅ Configuración válida")
+    # Limpieza manual
+    st.subheader("🧹 Limpieza de Backups")
     
-    # Mostrar configuración actual
+    col_clean1, col_clean2 = st.columns(2)
+    
+    with col_clean1:
+        if st.button("🗑️ Limpiar Backups Antiguos", use_container_width=True):
+            with st.spinner("Limpiando backups antiguos..."):
+                backup_system._clean_old_backups()
+                st.success("✅ Backups antiguos limpiados")
+                st.rerun()
+    
+    with col_clean2:
+        if st.button("🧪 Probar Sistema de Backup", use_container_width=True):
+            with st.spinner("Probando sistema de backup..."):
+                # Crear backup de prueba pequeño
+                test_file = backup_system.create_backup("database_only", "test_system")
+                if test_file:
+                    st.success("✅ Sistema de backup funcionando correctamente")
+                    
+                    # Eliminar backup de prueba
+                    test_file.unlink(missing_ok=True)
+                else:
+                    st.error("❌ Error en sistema de backup")
+
+def mostrar_configuracion_backup():
+    """Muestra configuración del sistema de backup"""
+    st.subheader("⚙️ Configuración de Backup")
+    
+    # Configuración actual
     with st.expander("📋 Configuración Actual"):
-        st.json(config.get_all(), expanded=False)
+        st.json(backup_system.backup_config, expanded=False)
     
-    # Controles de configuración
-    st.subheader("🛠️ Controles")
+    # Programar backup automático
+    st.markdown("#### 📅 Programar Backup Automático")
     
-    col_ctrl1, col_ctrl2 = st.columns(2)
+    col_sched1, col_sched2 = st.columns(2)
+    
+    with col_sched1:
+        auto_hour = st.slider("Hora del día:", 0, 23, 2,
+                             help="Hora en la que se ejecutará el backup automático (24h)")
+    
+    with col_sched2:
+        auto_type = st.selectbox("Tipo automático:", 
+                                ["full", "incremental", "database_only"],
+                                help="Tipo de backup que se creará automáticamente")
+    
+    if st.button("💾 Programar Backup Automático", use_container_width=True):
+        backup_system.schedule_backup(auto_hour, auto_type)
+        st.success(f"✅ Backup automático programado para las {auto_hour:02d}:00")
+    
+    # Configuración de retención
+    st.markdown("#### ⏱️ Configuración de Retención")
+    
+    col_ret1, col_ret2 = st.columns(2)
+    
+    with col_ret1:
+        retention_days = st.number_input("Días de retención:", 
+                                        min_value=1, max_value=365, 
+                                        value=backup_system.retention_days)
+    
+    with col_ret2:
+        max_backups = st.number_input("Máximo de backups:", 
+                                     min_value=1, max_value=100,
+                                     value=backup_system.max_backups)
+    
+    if st.button("🔄 Actualizar Configuración", use_container_width=True):
+        backup_system.retention_days = retention_days
+        backup_system.max_backups = max_backups
+        st.success("✅ Configuración actualizada")
+
+# ================================
+# NUEVA SECCIÓN: SISTEMA DE CACHÉ
+# ================================
+def mostrar_sistema_cache():
+    """Muestra el dashboard del sistema de caché"""
+    st.markdown("<div class='dashboard-header'><h1 class='header-title'>⚡ Sistema de Caché</h1><div class='header-subtitle'>Optimización y rendimiento</div></div>", unsafe_allow_html=True)
+    
+    tab1, tab2, tab3 = st.tabs(["📊 Estado", "🔍 Contenido", "⚙️ Configuración"])
+    
+    with tab1:
+        mostrar_estado_cache()
+    
+    with tab2:
+        mostrar_contenido_cache()
+    
+    with tab3:
+        mostrar_configuracion_cache()
+
+def mostrar_estado_cache():
+    """Muestra el estado del sistema de caché"""
+    try:
+        # Estadísticas globales
+        global_stats = cache_manager.get_global_stats()
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Namespaces", global_stats['total_namespaces'])
+        
+        with col2:
+            st.metric("Entradas Totales", global_stats['total_entries'])
+        
+        with col3:
+            st.metric("Hit Rate Global", global_stats['global_hit_rate'])
+        
+        with col4:
+            # Uso de memoria estimado
+            total_memory = 0
+            for namespace_stats in global_stats['namespaces'].values():
+                memory_str = namespace_stats.get('memory_usage', '0 B')
+                if 'KB' in memory_str:
+                    total_memory += float(memory_str.replace(' KB', '')) * 1024
+                elif 'MB' in memory_str:
+                    total_memory += float(memory_str.replace(' MB', '')) * 1024 * 1024
+                elif 'B' in memory_str:
+                    total_memory += float(memory_str.replace(' B', ''))
+            
+            if total_memory < 1024:
+                memory_display = f"{total_memory:.0f} B"
+            elif total_memory < 1024 * 1024:
+                memory_display = f"{total_memory / 1024:.1f} KB"
+            else:
+                memory_display = f"{total_memory / (1024 * 1024):.1f} MB"
+            
+            st.metric("Uso de Memoria", memory_display)
+        
+        # Gráfico de eficiencia por namespace
+        st.subheader("📈 Eficiencia por Namespace")
+        
+        if global_stats['namespaces']:
+            namespaces = list(global_stats['namespaces'].keys())
+            hit_rates = []
+            
+            for namespace in namespaces:
+                stats = global_stats['namespaces'][namespace]
+                total = stats['hits'] + stats['misses']
+                hit_rate = (stats['hits'] / total * 100) if total > 0 else 0
+                hit_rates.append(hit_rate)
+            
+            fig = go.Figure(data=[
+                go.Bar(
+                    x=namespaces,
+                    y=hit_rates,
+                    text=[f"{rate:.1f}%" for rate in hit_rates],
+                    textposition='auto',
+                    marker_color=['green' if rate > 70 else 'orange' if rate > 40 else 'red' for rate in hit_rates]
+                )
+            ])
+            
+            fig.update_layout(
+                title='Hit Rate por Namespace',
+                xaxis_title='Namespace',
+                yaxis_title='Hit Rate (%)',
+                yaxis=dict(range=[0, 100])
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Estadísticas detalladas por namespace
+        st.subheader("📋 Estadísticas Detalladas")
+        
+        for namespace, stats in global_stats['namespaces'].items():
+            with st.expander(f"📁 {namespace}"):
+                col_stat1, col_stat2, col_stat3 = st.columns(3)
+                
+                with col_stat1:
+                    st.metric("Hits", stats['hits'])
+                    st.metric("Misses", stats['misses'])
+                
+                with col_stat2:
+                    st.metric("Tasa de Acierto", stats['hit_rate'])
+                    st.metric("Eficiencia", stats['efficiency'])
+                
+                with col_stat3:
+                    st.metric("Tamaño", stats['size'])
+                    st.metric("Memoria", stats['memory_usage'])
+    
+    except Exception as e:
+        error_handler.handle(e, user_context="Error mostrando estado de caché")
+
+def mostrar_contenido_cache():
+    """Muestra el contenido del caché"""
+    st.subheader("🔍 Explorar Contenido del Caché")
+    
+    # Seleccionar namespace
+    global_stats = cache_manager.get_global_stats()
+    namespaces = list(global_stats['namespaces'].keys())
+    
+    if not namespaces:
+        st.info("No hay namespaces de caché disponibles")
+        return
+    
+    selected_namespace = st.selectbox("Seleccionar namespace:", namespaces)
+    cache_instance = cache_manager.get_namespace(selected_namespace)
+    
+    # Buscar en caché
+    search_term = st.text_input("🔎 Buscar por clave o patrón:", 
+                               placeholder="Ej: kpis_*, *trabajadores*")
+    
+    if search_term:
+        keys = [k for k in cache_instance.get_keys() if search_term in k]
+    else:
+        keys = cache_instance.get_keys()
+    
+    if keys:
+        st.write(f"**{len(keys)} entradas encontradas**")
+        
+        # Paginación
+        items_per_page = 20
+        total_pages = (len(keys) + items_per_page - 1) // items_per_page
+        page = st.number_input("Página:", min_value=1, max_value=total_pages, value=1)
+        
+        start_idx = (page - 1) * items_per_page
+        end_idx = min(start_idx + items_per_page, len(keys))
+        
+        # Mostrar entradas de la página actual
+        for i in range(start_idx, end_idx):
+            key = keys[i]
+            entry = cache_instance.cache.get(key)
+            
+            if entry:
+                with st.expander(f"🔑 {key[:50]}..." if len(key) > 50 else f"🔑 {key}"):
+                    col_entry1, col_entry2 = st.columns(2)
+                    
+                    with col_entry1:
+                        st.write(f"**Clave:** `{key}`")
+                        st.write(f"**Creado:** {entry.created_at.strftime('%H:%M:%S')}")
+                        st.write(f"**Último acceso:** {entry.last_accessed.strftime('%H:%M:%S')}")
+                        st.write(f"**Accesos:** {entry.access_count}")
+                    
+                    with col_entry2:
+                        st.write(f"**TTL:** {entry.ttl}s")
+                        st.write(f"**Expira en:** {entry.ttl - (datetime.now() - entry.created_at).total_seconds():.0f}s")
+                        st.write(f"**Etiquetas:** {', '.join(entry.tags) if entry.tags else 'Ninguna'}")
+                        
+                        # Previsualización del valor
+                        st.write("**Valor (preview):**")
+                        value_preview = str(entry.value)
+                        if len(value_preview) > 200:
+                            st.text(value_preview[:200] + "...")
+                        else:
+                            st.text(value_preview)
+                    
+                    # Botones de acción
+                    col_act1, col_act2 = st.columns(2)
+                    with col_act1:
+                        if st.button("🗑️ Invalidar", key=f"invalidate_{key}", use_container_width=True):
+                            cache_instance.invalidate(key)
+                            st.success("✅ Entrada invalidada")
+                            st.rerun()
+                    
+                    with col_act2:
+                        if st.button("📋 Ver Completo", key=f"view_{key}", use_container_width=True):
+                            st.json(entry.value, expanded=True)
+        
+        # Controles de paginación
+        if total_pages > 1:
+            st.write(f"Página {page} de {total_pages}")
+    else:
+        st.info("No se encontraron entradas en el caché")
+
+def mostrar_configuracion_cache():
+    """Muestra configuración del sistema de caché"""
+    st.subheader("⚙️ Configuración del Caché")
+    
+    # Estadísticas de la base de datos
+    st.markdown("#### 🗄️ Estadísticas de Base de Datos")
+    try:
+        db_stats = db.orm.get_stats()
+        
+        col_db1, col_db2, col_db3 = st.columns(3)
+        
+        with col_db1:
+            st.metric("Consultas Totales", db_stats['total_queries'])
+            st.metric("Fallos", db_stats['failed_queries'])
+        
+        with col_db2:
+            st.metric("Hit Rate DB", db_stats['cache_hit_rate'])
+            st.metric("Tiempo Respuesta", f"{db_stats['avg_response_time']:.2f}s")
+        
+        with col_db3:
+            st.metric("Tamaño Caché DB", db_stats['cache_size'])
+            st.metric("Conexiones Activas", db_stats['connections_in_use'])
+    
+    except Exception as e:
+        error_handler.handle(e, user_context="Error obteniendo estadísticas de DB")
+    
+    # Controles de caché
+    st.markdown("#### 🎛️ Controles de Caché")
+    
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
     
     with col_ctrl1:
-        if st.button("🔄 Recargar Configuración", use_container_width=True):
-            if config.reload():
-                st.success("Configuración recargada")
-                st.rerun()
-            else:
-                st.warning("No hubo cambios en la configuración")
+        if st.button("🔄 Refrescar Caché DB", use_container_width=True):
+            db.orm.clear_cache()
+            st.success("✅ Caché de base de datos refrescado")
     
     with col_ctrl2:
-        if st.button("💾 Guardar Configuración", use_container_width=True):
-            if config.save():
-                st.success("Configuración guardada")
-            else:
-                st.error("Error guardando configuración")
+        if st.button("🗑️ Limpiar Todo el Caché", use_container_width=True):
+            cache_manager.cache.clear()
+            for namespace in cache_manager.namespaces.values():
+                namespace.clear()
+            st.success("✅ Todo el caché limpiado")
     
-    # Editor de configuración simple
-    st.subheader("✏️ Editor de Configuración")
+    with col_ctrl3:
+        invalidate_tag = st.text_input("Invalidar por etiqueta:", placeholder="Ej: kpis")
+        if st.button("🏷️ Invalidar por Etiqueta", use_container_width=True):
+            if invalidate_tag:
+                invalidated_count = 0
+                for namespace in cache_manager.namespaces.values():
+                    invalidated_count += namespace.invalidate_by_tag(invalidate_tag)
+                st.success(f"✅ Invalidadas {invalidated_count} entradas con tag '{invalidate_tag}'")
     
-    config_key = st.text_input("Ruta de configuración (ej: database.timeout):")
-    if config_key:
-        current_value = config.get(config_key)
-        st.write(f"Valor actual: `{current_value}`")
-        
-        new_value = st.text_input("Nuevo valor:")
-        
-        if st.button("Actualizar", key=f"update_{config_key}"):
-            try:
-                # Intentar convertir a tipo apropiado
-                if new_value.lower() == 'true':
-                    parsed_value = True
-                elif new_value.lower() == 'false':
-                    parsed_value = False
-                elif new_value.isdigit():
-                    parsed_value = int(new_value)
-                elif new_value.replace('.', '', 1).isdigit():
-                    parsed_value = float(new_value)
-                else:
-                    parsed_value = new_value
-                
-                config.set(config_key, parsed_value, persist=True)
-                st.success(f"Configuración {config_key} actualizada")
-                st.rerun()
-            except Exception as e:
-                error_handler.handle(e, user_context="❌ Error actualizando configuración")
+    # Configuración de invalidación automática
+    st.markdown("#### ⚡ Invalidación Automática")
+    
+    auto_invalidate = st.checkbox("Invalidar caché automáticamente al guardar datos", value=True)
+    
+    if auto_invalidate:
+        st.info("ℹ️ El caché se invalidará automáticamente cuando se modifiquen datos.")
+    
+    # Monitoreo en tiempo real
+    st.markdown("#### 📊 Monitoreo en Tiempo Real")
+    
+    if st.button("📈 Actualizar Métricas", use_container_width=True):
+        st.rerun()
+
+# ================================
+# ACTUALIZAR FUNCIONES EXISTENTES PARA USAR NUEVOS MÓDULOS
+# ================================
+
+# Reemplazar todas las llamadas a funciones antiguas por las nuevas:
+
+def mostrar_dashboard_kpis():
+    """Muestra el dashboard principal con KPIs (OPTIMIZADO)"""
+    st.markdown("<div class='dashboard-header'><h1 class='header-title'>📊 Dashboard de KPIs Aeropostale</h1><div class='header-subtitle'>Control Logístico en Tiempo Real</div></div>", unsafe_allow_html=True)
+    
+    # Usar base de datos optimizada
+    if 'historico_data' not in st.session_state:
+        with st.spinner("Cargando datos históricos..."):
+            # Usar función con caché
+            st.session_state.historico_data = cargar_historico_kpis_cached()
+    
+    df = st.session_state.historico_data
+    # ... resto del código igual pero usando db en lugar de supabase directo ...
+
+def mostrar_ingreso_datos_kpis():
+    """Muestra la interfaz para ingresar datos de KPIs (OPTIMIZADO)"""
+    if not verificar_password("admin"):
+        solicitar_autenticacion("admin")
+        return
+    
+    st.markdown("<div class='dashboard-header'><h1 class='header-title'>📥 Ingreso de Datos de KPIs</h1><div class='header-subtitle'>Registro diario de producción</div></div>", unsafe_allow_html=True)
+    
+    # Usar base de datos optimizada
+    df_trabajadores = obtener_trabajadores_cached()
+    # ... resto del código usando db.guardar_datos_kpis() ...
+
+def mostrar_gestion_distribuciones():
+    """Muestra la interfaz para gestionar distribuciones semanales (OPTIMIZADO)"""
+    if not verificar_password("admin"):
+        solicitar_autenticacion("admin")
+        return
+    
+    st.markdown("<div class='dashboard-header'><h1 class='header-title'>📊 Gestión de Distribuciones Semanales</h1></div>", unsafe_allow_html=True)
+    
+    # Usar funciones optimizadas
+    fecha_inicio_semana_str = (datetime.now().date() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+    distribuciones_existentes = obtener_distribuciones_semana_cached(fecha_inicio_semana_str)
+    
+    # ... resto del código usando db.guardar_distribuciones_semanales() ...
+
+def mostrar_generacion_guias():
+    """Muestra la interfaz para generar guías de envío (OPTIMIZADO)"""
+    st.markdown("<div class='dashboard-header'><h1 class='header-title'>📦 Generación de Guías de Envío</h1><div class='header-subtitle'>Sistema de etiquetado logístico</div></div>", unsafe_allow_html=True)
+    
+    # Usar funciones optimizadas
+    tiendas = db.obtener_tiendas()  # Necesitaríamos agregar esta función a AeropostaleDB
+    # ... resto del código usando db.guardar_guia() ...
+
+def mostrar_historial_guias():
+    """Muestra el historial de guías generadas (OPTIMIZADO)"""
+    if not verificar_password("user"):
+        if st.session_state.user_type is None:
+            solicitar_autenticacion("user")
+        return
+    
+    st.markdown("<div class='dashboard-header'><h1 class='header-title'>🔍 Historial de Guías de Envío</h1><div class='header-subtitle'>Registro y seguimiento de envíos</div></div>", unsafe_allow_html=True)
+    
+    # Usar función con caché
+    df_guias = obtener_historial_guias_cached(limit=1000)
+    # ... resto del código usando db.eliminar_guia() ...
 
 # ================================
 # ACTUALIZAR MENÚ PRINCIPAL
 # ================================
-# En la función main(), agregar la nueva opción al menú:
-
 def main():
     """Función principal de la aplicación"""
     
@@ -603,18 +721,22 @@ def main():
         st.markdown("""
         <div class='sidebar-logo'>
             <div class='logo-text'>AEROPOSTALE</div>
-            <div class='logo-subtext'>Sistema de Gestión Logística</div>
+            <div class='logo-subtext'>Sistema de Gestión Logística v2.0</div>
         </div>
         """, unsafe_allow_html=True)
         
         menu_options = [
-            # Opción NUEVA: Sistema de Salud
+            # Nuevos módulos de Fase 2
+            ("💾 Sistema de Backup", "💾", mostrar_sistema_backup, "admin"),
+            ("⚡ Sistema de Caché", "⚡", mostrar_sistema_cache, "admin"),
+            
+            # Módulos de Fase 1
             ("❤️ Sistema de Salud", "🩺", mostrar_sistema_salud, "admin"),
             
-            # NUEVO: Dashboard WILO AI
+            # Dashboard WILO AI
             ("🧠 WILO AI Dashboard", "🤖", mostrar_dashboard_wilo_ai, "admin"),
             
-            # Módulos originales existentes
+            # Módulos originales existentes (optimizados)
             ("Dashboard KPIs", "📊", mostrar_dashboard_kpis, "public"),
             ("Análisis Histórico", "📈", mostrar_analisis_historico_kpis, "public"),
             ("Ingreso de Datos", "📥", mostrar_ingreso_datos_kpis, "admin"),
@@ -631,4 +753,149 @@ def main():
             ("⏱️ WILO: Tempo Análisis", "⏱️", modulo_tempo_analisis, "user"),
         ]
         
-        # ... resto del código del menú se mantiene igual ...
+        # Mostrar opciones del menú según permisos
+        for i, (label, icon, _, permiso) in enumerate(menu_options):
+            mostrar_opcion = False
+            
+            if permiso == "public":
+                mostrar_opcion = True
+            elif permiso == "user" and st.session_state.user_type in ["user", "admin"]:
+                mostrar_opcion = True
+            elif permiso == "admin" and st.session_state.user_type == "admin":
+                mostrar_opcion = True
+            
+            if mostrar_opcion:
+                selected = st.button(
+                    f"{icon} {label}",
+                    key=f"menu_{i}",
+                    use_container_width=True
+                )
+                if selected:
+                    st.session_state.selected_menu = i
+        
+        # Botones de autenticación
+        st.markdown("---")
+        if st.session_state.user_type is None:
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("👤 Acceso Usuario", use_container_width=True):
+                    st.session_state.show_login = True
+                    st.session_state.login_type = "user"
+            with col2:
+                if st.button("🔧 Acceso Admin", use_container_width=True):
+                    st.session_state.show_login = True
+                    st.session_state.login_type = "admin"
+        else:
+            if st.button("🚪 Cerrar Sesión", use_container_width=True):
+                st.session_state.user_type = None
+                st.session_state.password_correct = False
+                st.session_state.selected_menu = 0
+                st.session_state.show_login = False
+                st.rerun()
+            
+            tipo_usuario = "Administrador" if st.session_state.user_type == "admin" else "Usuario"
+            st.markdown(f"""
+            <div class="alert-banner alert-info" style="margin-top: 20px;">
+                <strong>👤 Usuario:</strong> {tipo_usuario}
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Mostrar formulario de autenticación si es necesario
+    if st.session_state.get('show_login', False):
+        solicitar_autenticacion(st.session_state.get('login_type', 'user'))
+        return
+    
+    # Verificar que selected_menu esté dentro del rango válido
+    if st.session_state.selected_menu >= len(menu_options):
+        st.session_state.selected_menu = 0
+    
+    # Obtener y ejecutar la función seleccionada
+    label, icon, func, permiso = menu_options[st.session_state.selected_menu]
+    
+    if permiso == "public":
+        func()
+    elif permiso == "user" and st.session_state.user_type in ["user", "admin"]:
+        func()
+    elif permiso == "admin" and st.session_state.user_type == "admin":
+        func()
+    else:
+        if not st.session_state.get('show_login', False):
+            st.error("🔒 Acceso restringido. Necesita autenticarse para acceder a esta sección.")
+        
+        if permiso == "admin" and not st.session_state.get('show_login', False):
+            st.session_state.show_login = True
+            st.session_state.login_type = "admin"
+            st.rerun()
+        elif not st.session_state.get('show_login', False):
+            st.session_state.show_login = True
+            st.session_state.login_type = "user"
+            st.rerun()
+    
+    # Footer
+    st.markdown("""
+    <div class="footer">
+        Sistema de KPIs Aeropostale v2.0 | © 2025 Aeropostale. Todos los derechos reservados.<br>
+        Desarrollado por: <a href="mailto:wilson.perez@aeropostale.com" class="footer-link">Wilson Pérez</a>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ================================
+# INICIALIZACIÓN DE SISTEMAS EN SEGUNDO PLANO
+# ================================
+def init_background_systems():
+    """Inicializa sistemas que corren en segundo plano"""
+    try:
+        # Iniciar monitoreo de salud
+        if not st.session_state.get('health_monitoring_started', False):
+            init_health_monitoring(interval=60)
+            st.session_state.health_monitoring_started = True
+            logger.info("✅ Monitoreo de salud iniciado")
+        
+        # Programar backup automático (solo si está habilitado)
+        config = get_config()
+        if config.get('features.auto_backup', True):
+            backup_system.schedule_backup(hour=2, backup_type="incremental")
+            logger.info("✅ Backup automático programado")
+        
+        # Iniciar limpieza periódica de caché
+        def cache_cleanup():
+            while True:
+                time.sleep(3600)  # Cada hora
+                try:
+                    # Limpiar caché de funciones que no se han usado en 24h
+                    cache_manager.cache._cleanup_expired()
+                    logger.debug("Limpieza periódica de caché ejecutada")
+                except Exception as e:
+                    logger.error(f"Error en limpieza de caché: {e}")
+        
+        cleanup_thread = threading.Thread(target=cache_cleanup, daemon=True)
+        cleanup_thread.start()
+        
+    except Exception as e:
+        error_handler.handle(e, user_context="Error inicializando sistemas en segundo plano")
+
+# ================================
+# PUNTO DE ENTRADA
+# ================================
+if __name__ == "__main__":
+    try:
+        # Inicializar sistemas en segundo plano
+        init_background_systems()
+        
+        # Ejecutar aplicación principal
+        main()
+        
+    except Exception as e:
+        st.error(f"Error crítico en la aplicación: {e}")
+        logger.error(f"Error en main: {e}", exc_info=True)
+        
+        # Intentar crear un backup de emergencia
+        try:
+            emergency_backup = backup_system.create_backup(
+                "full", 
+                f"emergency_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            if emergency_backup:
+                logger.info(f"Backup de emergencia creado: {emergency_backup}")
+        except:
+            logger.error("No se pudo crear backup de emergencia")
