@@ -845,11 +845,17 @@ def main():
 def init_background_systems():
     """Inicializa sistemas que corren en segundo plano"""
     try:
-        # Iniciar monitoreo de salud
-        if not st.session_state.get('health_monitoring_started', False):
-            init_health_monitoring(interval=60)
-            st.session_state.health_monitoring_started = True
-            logger.info("✅ Monitoreo de salud iniciado")
+        # ... (código anterior) ...
+        
+        # Inicializar WILO AI si está habilitado
+        config = get_config()
+        if config.get('features.wilo_ai_enabled', True):
+            wilo_ai = get_wilo_ai_manager()
+            if wilo_ai.initialize():
+                wilo_ai.start_background_monitoring()
+                logger.info("✅ WILO AI iniciado en segundo plano")
+            else:
+                logger.warning("⚠️ No se pudo inicializar WILO AI")
         
         # Programar backup automático (solo si está habilitado)
         config = get_config()
