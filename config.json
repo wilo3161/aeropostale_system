@@ -1,1 +1,10 @@
-
+{
+  "imap_server": "mail.fashionclub.com.ec",
+  "imap_port": 993,
+  "smtp_server": "smtp.fashionclub.com.ec",
+  "smtp_port": 587,
+  "username": "notificaciones@fashionclub.com.ec",
+  "password": "",
+  "scan_folders": ["INBOX", "Alertas"],
+  "scan_interval_minutes": 5
+}
